@@ -54,8 +54,11 @@ asm_sum8:
         add eax, r8d
         add eax, r9d
 
-        add eax, r10d ; stack
-        add eax, r11d ; stack
+        mov r10d, [rsp+8]
+        add eax, r10d
+        mov r11d, [rsp+16]
+        add eax, r11d
+        
         ret
 
 ; void asm_sum_array(uint32_t x[4], uint32_t y[4], uint32_t ret[4]);
@@ -63,22 +66,16 @@ asm_sum8:
 ; Add array of 32-bit values and return result
 MKGLOBAL(asm_sum_array,function)
 asm_sum_array:
-        mov eax, [rdi+0]
-        add eax, [rsi+0]
-        mov [rdx+0], eax
 
-        mov eax, [rdi+4] ; is rdi[4] or [rdi+4*1] better?
-        add eax, [rsi+4]
-        mov [rdx+4], eax
+        mov rcx, 3
 
-        mov eax, [rdi+8]
-        add eax, [rsi+8]
-        mov [rdx+8], eax
+        loop:
+        mov eax, [rdi+rcx*4]
+        add eax, [rsi+rcx*4]
+        mov [rdx+rcx*4], eax
+        dec ecx
+        jns loop
 
-        mov eax, [rdi+12]
-        add eax, [rsi+12]
-        mov [rdx+12], eax
-        
         ret
 
 ; uint16_t asm_min_array(uint16_t x[4]);
@@ -87,22 +84,18 @@ asm_sum_array:
 MKGLOBAL(asm_min_array,function)
 asm_min_array:
         mov ax, [rdi+0]
-
-        cmp ax, [rdi+2]
-        jb lessthan
-        mov ax, [rdi+2]
-
-        lessthan:
-        cmp ax, [rdi+4]
-        jb lessthan2
-        mov ax, [rdi+4]
-
-        lessthan2:
-        cmp ax, [rdi+6]
-        jb lessthan3
-        mov ax, [rdi+6] ; conditional moves
-
-        lessthan3:
+        mov rcx, 0
+        
+        min_loop:
+        inc rcx
+        cmp rcx, 4
+        jae done
+        cmp ax, [rdi+rcx*2]
+        jbe min_loop
+        mov ax, [rdi+rcx*2]
+        jmp min_loop
+        
+        done:
         ret
 
 ; void memcpy_bytes(void *src, void *dst, uint32_t num_bytes);
