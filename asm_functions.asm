@@ -47,18 +47,21 @@ asm_mul:
 ; Adds eight 16-bit values and return the 32-bit result
 MKGLOBAL(asm_sum8,function)
 asm_sum8:
-        mov eax, edi
-        add eax, esi
-        add eax, edx
-        add eax, ecx
-        add eax, r8d
-        add eax, r9d
-
-        mov r10d, [rsp+8] ; stack
+        movzx eax, di
+        movzx r10d, si
         add eax, r10d
-        mov r11d, [rsp+16] ; stack
-        add eax, r11d
-        
+        movzx r10d, dx
+        add eax, r10d
+        movzx r10d, cx
+        add eax, r10d
+        movzx r10d, r8w
+        add eax, r10d
+        movzx r10d, r9w
+        add eax, r10d
+
+        add eax, [rsp+8]
+        add eax, [rsp+16]
+
         ret
 
 ; void asm_sum_array(uint32_t x[4], uint32_t y[4], uint32_t ret[4]);
@@ -66,10 +69,9 @@ asm_sum8:
 ; Add array of 32-bit values and return result
 MKGLOBAL(asm_sum_array,function)
 asm_sum_array:
-
         mov rcx, 3
 
-        loop:
+loop:
         mov eax, [rdi+rcx*4]
         add eax, [rsi+rcx*4]
         mov [rdx+rcx*4], eax
@@ -86,13 +88,12 @@ asm_min_array:
         mov ax, [rdi+0]
         mov rcx, 0
 
-        min_loop:
+min_loop:
         inc rcx
         cmp rcx, 4
         jae done ; above or equal 4
         cmp ax, [rdi+rcx*2] ; compare to next
-        jbe min_loop
-        mov ax, [rdi+rcx*2] ; put smaller value into ax
+        cmova ax, [rdi+rcx*2] ; mov smaller if ax is greater
         jmp min_loop
         
         done:
@@ -103,19 +104,13 @@ asm_min_array:
 ; Copy "num_bytes" number of bytes from source to destination
 MKGLOBAL(memcpy_bytes,function)
 memcpy_bytes:
-        mov ecx, edx
-        test ecx, ecx ; to check if zero - uses flags
+        mov rcx, rdx
+        or rcx, rcx
         jz copy_done
 
-        copy_loop:
-        mov al, [rsi]
-        mov [rdi], al
-        inc rdi
-        inc rsi
-        dec ecx
-        jnz copy_loop
+        rep movsb ; Cycles/B = 0.02 
 
-        copy_done:
+copy_done:
         ret
 
 ; void memcpy_bits(void *dst, void *src, uint32_t num_bits);
@@ -124,23 +119,17 @@ memcpy_bytes:
 MKGLOBAL(memcpy_bits,function)
 memcpy_bits:
         ; Calculate number of full bytes and remaining bits
-        mov ecx, edx        ; num_bits in ecx
         mov r8d, edx
         shr edx, 3          ; num_bytes = num_bits / 8
-
+        mov rcx, rdx
+        
         ; Copy full bytes
         test edx, edx
         jz copy_bits_part
 
-        copy_bytes_loop:
-        mov al, [rsi]
-        mov [rdi], al
-        inc rsi
-        inc rdi
-        dec edx
-        jnz copy_bytes_loop
+        rep movsb
 
-        copy_bits_part:
+copy_bits_part:
         ; Copy remaining bits if any
         and r8d, 7          ; remaining_bits = num_bits % 8
         jz bits_done
