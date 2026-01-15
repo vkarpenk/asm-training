@@ -127,7 +127,6 @@ memcpy_bits:
         mov ecx, edx        ; num_bits in ecx
         mov r8d, edx
         shr edx, 3          ; num_bytes = num_bits / 8
-        and ecx, 7          ; remaining_bits = num_bits % 8
 
         ; Copy full bytes
         test edx, edx
@@ -143,18 +142,23 @@ memcpy_bits:
 
         copy_bits_part:
         ; Copy remaining bits if any
-        test ecx, ecx
+        and r8d, 7          ; remaining_bits = num_bits % 8
         jz bits_done
 
-        ; Create bit mask for remaining bits
-        mov al, 1
-        shl al, cl
-        dec al              ; mask = (1 << remaining_bits) - 1
+        ; Create bit mask for remaining bits (high bits)
+        mov cl, 8
+        sub cl, r8b         ; shift_amount = 8 - remaining_bits
+        mov al, 0xff        ; Start with all bits set (11111111)
+        shl al, cl          ; Shift left to create mask (e.g., 3 bits → 11100000)
 
         ; Copy bits using mask
-        mov r9b, [rsi]
-        and r9b, al
-        mov [rdi], r9b
+        mov r9b, [rsi]      ; Load source byte
+        and r9b, al         ; Extract only the high bits we want
+        mov r10b, [rdi]     ; Load destination byte
+        not al              ; Invert mask (e.g., 11100000 → 00011111)
+        and r10b, al        ; Keep only the low bits we want to preserve
+        or r10b, r9b        ; Combine: preserved low bits | new high bits
+        mov [rdi], r10b     ; Write result back
 
         bits_done:
         ret
