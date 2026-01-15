@@ -69,14 +69,15 @@ asm_sum8:
 ; Add array of 32-bit values and return result
 MKGLOBAL(asm_sum_array,function)
 asm_sum_array:
-        mov rcx, 3
-
-loop:
-        mov eax, [rdi+rcx*4]
-        add eax, [rsi+rcx*4]
-        mov [rdx+rcx*4], eax
-        dec rcx
-        jns loop ; not signed (jump if positive)
+        ;Loads a double quadword (128 bits / 16 bytes) of unaligned data from memory into XMM register.
+        ;A double quadword is 128 bits or 16 bytes, which can hold:
+        ;- 4 x 32-bit values (dwords)
+        ;- 2 x 64-bit values (qwords)
+        ;- 16 x 8-bit values (bytes)
+        movdqu xmm0, [rdi]      ; Load 4 x 32-bit values from x 
+        movdqu xmm1, [rsi]      ; Load 4 x 32-bit values from y
+        paddd xmm0, xmm1        ; Add packed doublewords
+        movdqu [rdx], xmm0      ; Store result to ret
 
         ret
 
@@ -85,18 +86,16 @@ loop:
 ; Find the minimum value of an array of four 16-bit values
 MKGLOBAL(asm_min_array,function)
 asm_min_array:
-        mov ax, [rdi+0]
-        mov rcx, 0
-
-min_loop:
-        inc rcx
-        cmp rcx, 4
-        jae done ; above or equal 4
-        cmp ax, [rdi+rcx*2] ; compare to next
-        cmova ax, [rdi+rcx*2] ; mov smaller if ax is greater
-        jmp min_loop
+        movq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
         
-        done:
+        pshuflw xmm1, xmm0, 0x0E ; Move words '10' (2->pos0), '11' (3->pos1), 0->pos2, 0->pos3 = [3,2,1,0][0,0,3,2]
+        pminuw xmm0, xmm1        ; Compare 0,2 and 1,3 - lowest 2 words, result in xmm0 = [3,2,1,0][0,0,(3or1),(2or0)]
+        
+        pshuflw xmm1, xmm0, 0x01 ; Move '01' (1->pos0), 0 to all other positions = [3,2,1,0][(2or0),(2or0),(2or0),(3or1)]
+        pminuw xmm0, xmm1        ; Compare 0,(3or1) and 1,(2or0), result in lowest word = [3,2,1,0][(2or0),(2or0),1or(2or0),0or(3or1)]
+        
+        movd eax, xmm0          ; Move result to eax (32bits)
+        and eax, 0xFFFF         ; Keep only lower 16 bits
         ret
 
 ; void memcpy_bytes(void *dst, void *src, uint32_t num_bytes);
@@ -104,13 +103,32 @@ min_loop:
 ; Copy "num_bytes" number of bytes from source to destination
 MKGLOBAL(memcpy_bytes,function)
 memcpy_bytes:
+        mov ecx, edx
         mov rcx, rdx
-        or rcx, rcx
+        or ecx, ecx
         jz copy_done
 
-        rep movsb ; Cycles/B = 0.02 
+        ; Process 16-byte chunks with SSE
+        cmp ecx, 16
+        jb copy_remaining_bytes
 
-copy_done:
+copy_16_loop:
+        movdqu xmm0, [rsi]      ; Load 16 bytes
+        movdqu [rdi], xmm0      ; Store 16 bytes
+        add rsi, 16
+        add rdi, 16
+        sub ecx, 16
+        cmp ecx, 16
+        jae copy_16_loop
+
+copy_remaining_bytes:
+        ; Copy remaining bytes (< 16)
+        or ecx, ecx
+        jz copy_done
+ 
+        rep movsb
+
+        copy_done:
         ret
 
 ; void memcpy_bits(void *dst, void *src, uint32_t num_bits);
@@ -119,12 +137,43 @@ copy_done:
 MKGLOBAL(memcpy_bits,function)
 memcpy_bits:
         ; Calculate number of full bytes and remaining bits
+        mov ecx, edx        ; num_bits in ecx
         mov r8d, edx
         shr edx, 3          ; num_bytes = num_bits / 8
+
+        ; Copy full bytes using SSE when possible
+        or edx, edx
+        jz copy_bits_part
+
+        ; Process 16-byte chunks with SSE
+        cmp edx, 16
+        jb copy_remaining_bytes_scalar
+
+        ; Save registers and prepare for call
+        push rdi
+        push rsi
+        push rdx
+
+        ; Call existing copy_16_loop
+        mov ecx, edx
+        call copy_16_loop
+
+        ; Restore registers
+        pop rdx
+        pop rsi
+        pop rdi
+
+        ; Update pointers and counter based on bytes copied
+        mov eax, edx
+        and eax, ~15        ; bytes copied = edx & ~15
+        add rsi, rax
+        add rdi, rax
+        and edx, 15         ; remaining bytes = edx & 15
+
+copy_remaining_bytes_scalar:
+        ; Copy remaining bytes (< 16) scalar
         mov rcx, rdx
-        
-        ; Copy full bytes
-        test edx, edx
+        or edx, edx
         jz copy_bits_part
 
         rep movsb
@@ -149,5 +198,5 @@ copy_bits_part:
         or r10b, r9b        ; Combine: preserved low bits | new high bits
         mov [rdi], r10b     ; Write result back
 
-        bits_done:
+bits_done:
         ret
