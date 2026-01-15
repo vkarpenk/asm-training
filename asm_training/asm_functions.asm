@@ -54,9 +54,9 @@ asm_sum8:
         add eax, r8d
         add eax, r9d
 
-        mov r10d, [rsp+8]
+        mov r10d, [rsp+8] ; stack
         add eax, r10d
-        mov r11d, [rsp+16]
+        mov r11d, [rsp+16] ; stack
         add eax, r11d
         
         ret
@@ -73,8 +73,8 @@ asm_sum_array:
         mov eax, [rdi+rcx*4]
         add eax, [rsi+rcx*4]
         mov [rdx+rcx*4], eax
-        dec ecx
-        jns loop
+        dec rcx
+        jns loop ; not signed (jump if positive)
 
         ret
 
@@ -85,28 +85,40 @@ MKGLOBAL(asm_min_array,function)
 asm_min_array:
         mov ax, [rdi+0]
         mov rcx, 0
-        
+
         min_loop:
         inc rcx
         cmp rcx, 4
-        jae done
-        cmp ax, [rdi+rcx*2]
+        jae done ; above or equal 4
+        cmp ax, [rdi+rcx*2] ; compare to next
         jbe min_loop
-        mov ax, [rdi+rcx*2]
+        mov ax, [rdi+rcx*2] ; put smaller value into ax
         jmp min_loop
         
         done:
         ret
 
-; void memcpy_bytes(void *src, void *dst, uint32_t num_bytes);
+; void memcpy_bytes(void *dst, void *src, uint32_t num_bytes);
 ;
 ; Copy "num_bytes" number of bytes from source to destination
 MKGLOBAL(memcpy_bytes,function)
 memcpy_bytes:
+        mov ecx, edx
+        test ecx, ecx ; to check if zero - uses flags
+        jz copy_done
 
+        copy_loop:
+        mov al, [rsi]
+        mov [rdi], al
+        inc rdi
+        inc rsi
+        dec ecx
+        jnz copy_loop
+
+        copy_done:
         ret
 
-; void memcpy_bits(void *src, void *dst, uint32_t num_bits);
+; void memcpy_bits(void *dst, void *src, uint32_t num_bits);
 ;
 ; Copy "num_bits" number of bits from source to destination
 MKGLOBAL(memcpy_bits,function)
