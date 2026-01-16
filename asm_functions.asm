@@ -86,13 +86,41 @@ asm_sum_array:
 ; Find the minimum value of an array of four 16-bit values
 MKGLOBAL(asm_min_array,function)
 asm_min_array:
+; solution 1
+        ; movq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
+        
+        ; pshuflw xmm1, xmm0, 0x0E ; Move words '10' (2->pos0), '11' (3->pos1), 0->pos2, 0->pos3 = [3,2,1,0][0,0,3,2]
+        ; pminuw xmm0, xmm1        ; Compare 0,2 and 1,3 - lowest 2 words, result in xmm0 = [3,2,1,0][0,0,(3or1),(2or0)]
+        
+        ; pshuflw xmm1, xmm0, 0x01 ; Move '01' (1->pos0), 0 to all other positions = [3,2,1,0][(2or0),(2or0),(2or0),(3or1)]
+        ; pminuw xmm0, xmm1        ; Compare 0,(3or1) and 1,(2or0), result in lowest word = [3,2,1,0][(2or0),(2or0),1or(2or0),0or(3or1)]
+        
+        ; movd eax, xmm0          ; Move result to eax (32bits)
+        ; and eax, 0xFFFF         ; Keep only lower 16 bits
+
+; solution 2
+        ; only for 128 - phminposuw - find min and tells index - need to load same values across all xmm - or all 1s
+
+        ; movq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
+        ; pcmpeqw xmm1, xmm1      ; Set xmm1 to all 1s (0xFFFF in each word)
+        ; punpcklqdq xmm0, xmm1   ; Fill upper 64 bits with 0xFFFF values
+        ; phminposuw xmm0, xmm0   ; Find minimum and its index, result in lowest word
+        ; movd eax, xmm0          ; Move result to eax
+        ; and eax, 0xFFFF         ; Keep only lower 16 bits (the minimum value)
+        ; ret
+
+; solution 3
+        ; use movdqa and get rid of first shuf
+        ; shuf can be replaced with shift psrlq
         movq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
+        movdqa xmm1, xmm0       ; Copy to xmm1
         
-        pshuflw xmm1, xmm0, 0x0E ; Move words '10' (2->pos0), '11' (3->pos1), 0->pos2, 0->pos3 = [3,2,1,0][0,0,3,2]
-        pminuw xmm0, xmm1        ; Compare 0,2 and 1,3 - lowest 2 words, result in xmm0 = [3,2,1,0][0,0,(3or1),(2or0)]
+        psrlq xmm1, 32          ; Shift right by 32 bits to compare words 0,1 with 2,3
+        pminuw xmm0, xmm1       ; xmm0 now has min(0,2) and min(1,3) in lower 32 bits
         
-        pshuflw xmm1, xmm0, 0x01 ; Move '01' (1->pos0), 0 to all other positions = [3,2,1,0][(2or0),(2or0),(2or0),(3or1)]
-        pminuw xmm0, xmm1        ; Compare 0,(3or1) and 1,(2or0), result in lowest word = [3,2,1,0][(2or0),(2or0),1or(2or0),0or(3or1)]
+        movdqa xmm1, xmm0       ; Copy result
+        psrlq xmm1, 16          ; Shift right by 16 bits to compare min(0,2) with min(1,3)
+        pminuw xmm0, xmm1       ; xmm0 now has overall minimum in lowest word
         
         movd eax, xmm0          ; Move result to eax (32bits)
         and eax, 0xFFFF         ; Keep only lower 16 bits
@@ -104,7 +132,6 @@ asm_min_array:
 MKGLOBAL(memcpy_bytes,function)
 memcpy_bytes:
         mov ecx, edx
-        mov rcx, rdx
         or ecx, ecx
         jz copy_done
 
@@ -125,8 +152,12 @@ copy_remaining_bytes:
         ; Copy remaining bytes (< 16)
         or ecx, ecx
         jz copy_done
+        cld                     ; Clear direction flag for rep (increment rsi/rdi)
  
         rep movsb
+        ; rep can go backwards inc of dec registers - uses flag direction 
+        ; std set dir flag, cdf clear (increment)
+        ; good to set status of flag before rep
 
         copy_done:
         ret
@@ -139,44 +170,16 @@ memcpy_bits:
         ; Calculate number of full bytes and remaining bits
         mov ecx, edx        ; num_bits in ecx
         mov r8d, edx
-        shr edx, 3          ; num_bytes = num_bits / 8
 
-        ; Copy full bytes using SSE when possible
-        or edx, edx
-        jz copy_bits_part
+        shr ecx, 3          ; num_bytes = num_bits / 8
+        jz copy_bits_part   ; If no full bytes, go to bit copying
 
-        ; Process 16-byte chunks with SSE
-        cmp edx, 16
-        jb copy_remaining_bytes_scalar
+        mov edx, ecx        ; num_bytes as third parameter
+        call memcpy_bytes
 
-        ; Save registers and prepare for call
-        push rdi
-        push rsi
-        push rdx
-
-        ; Call existing copy_16_loop
-        mov ecx, edx
-        call copy_16_loop
-
-        ; Restore registers
-        pop rdx
-        pop rsi
-        pop rdi
-
-        ; Update pointers and counter based on bytes copied
-        mov eax, edx
-        and eax, ~15        ; bytes copied = edx & ~15
-        add rsi, rax
-        add rdi, rax
-        and edx, 15         ; remaining bytes = edx & 15
-
-copy_remaining_bytes_scalar:
-        ; Copy remaining bytes (< 16) scalar
-        mov rcx, rdx
-        or edx, edx
-        jz copy_bits_part
-
-        rep movsb
+        ; Adjust pointers for remaining bits
+        add rdi, rcx        ; Move dst past copied bytes
+        add rsi, rcx        ; Move src past copied bytes
 
 copy_bits_part:
         ; Copy remaining bits if any
