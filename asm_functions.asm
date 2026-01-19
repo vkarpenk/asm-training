@@ -69,13 +69,11 @@ asm_sum8:
 ; Add array of 32-bit values and return result
 MKGLOBAL(asm_sum_array,function)
 asm_sum_array:
-        ; Use AVX instructions for improved performance
-        ; vmovdqu loads 128 bits without destroying original source
-        ; AVX uses 3-operand form: dest = src1 op src2
-        vmovdqu xmm0, [rdi]     ; Load 4 x 32-bit values from x
-        vmovdqu xmm1, [rsi]     ; Load 4 x 32-bit values from y
-        vpaddd xmm0, xmm0, xmm1 ; Add packed doublewords: xmm0 = xmm0 + xmm1
-        vmovdqu [rdx], xmm0     ; Store result to ret
+        ; Use AVX-512 instructions for improved performance
+        ; AVX-512 provides EVEX encoding with opmask and broadcast features
+        vmovdqu32 xmm0, [rdi]     ; Load 4 x 32-bit values from x (AVX-512 explicit size)
+        vpaddd xmm0, xmm0, [rsi]  ; Add packed doublewords directly from memory
+        vmovdqu32 [rdx], xmm0     ; Store result to ret (AVX-512 explicit size)
 
         ret
 
@@ -84,63 +82,17 @@ asm_sum_array:
 ; Find the minimum value of an array of four 16-bit values
 MKGLOBAL(asm_min_array,function)
 asm_min_array:
-; solution 1
-        ; vmovq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
+        ; AVX-512 optimized version with explicit size suffix
+        vmovq xmm0, [rdi]           ; Load 4 x 16-bit values from x (using 64 bits)
         
-        ; vpshuflw xmm1, xmm0, 0x0E ; Move words '10' (2->pos0), '11' (3->pos1), 0->pos2, 0->pos3 = [3,2,1,0][0,0,3,2]
-        ; vpminuw xmm0, xmm0, xmm1  ; Compare 0,2 and 1,3 - lowest 2 words, result in xmm0 = [3,2,1,0][0,0,(3or1),(2or0)]
+        vpsrlq xmm1, xmm0, 32       ; Shift right by 32 bits to compare words 0,1 with 2,3
+        vpminuw xmm0, xmm0, xmm1    ; xmm0 now has min(0,2) and min(1,3) in lower 32 bits
         
-        ; vpshuflw xmm1, xmm0, 0x01 ; Move '01' (1->pos0), 0 to all other positions = [3,2,1,0][(2or0),(2or0),(2or0),(3or1)]
-        ; vpminuw xmm0, xmm0, xmm1  ; Compare 0,(3or1) and 1,(2or0), result in lowest word = [3,2,1,0][(2or0),(2or0),1or(2or0),0or(3or1)]
+        vpsrlq xmm1, xmm0, 16       ; Shift right by 16 bits to compare min(0,2) with min(1,3)
+        vpminuw xmm0, xmm0, xmm1    ; xmm0 now has overall minimum in lowest word
         
-        ; vmovd eax, xmm0          ; Move result to eax (32bits)
-        ; and eax, 0xFFFF          ; Keep only lower 16 bits
-
-; solution 2
-        ; only for 128 - phminposuw - find min and tells index - need to load same values across all xmm - or all 1s
-
-        ; This code sequence finds the minimum unsigned 16-bit word value and its position
-        ; from the lower 64 bits (4 words) of an XMM register.
-
-        ; vpcmpeqw xmm1, xmm1, xmm1
-        ;   - AVX instruction that compares each word in xmm1 with itself
-        ;   - Since all comparisons are equal, sets all bits to 1
-        ;   - Result: xmm1 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
-        ;
-        ; vpunpcklqdq xmm0, xmm0, xmm1
-        ;   - AVX instruction that unpacks and interleaves the low quadwords (64 bits)
-        ;   - Takes lower 64 bits from first operand (xmm0) and lower 64 bits from second (xmm1)
-        ;   - Result: xmm0[63:0] = original xmm0[63:0], xmm0[127:64] = 0xFFFFFFFFFFFFFFFF
-        ;   - This effectively pads the upper half with maximum unsigned word values
-        ;
-        ; vphminposuw xmm0, xmm0
-        ;   - AVX instruction that finds the minimum unsigned 16-bit word and its position
-        ;   - Searches through all 8 words in the source XMM register
-        ;   - Returns minimum value in xmm0[15:0] and its index (0-7) in xmm0[18:16]
-        ;   - Since upper 4 words are 0xFFFF (maximum), minimum will be from lower 4 words
-        ;   - xmm0[31:19] and xmm0[127:32] are zeroed
-        
-        ; vmovq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
-        ; vpcmpeqw xmm1, xmm1, xmm1 ; Set xmm1 to all 1s (0xFFFF in each word)
-        ; vpunpcklqdq xmm0, xmm0, xmm1 ; Fill upper 64 bits with 0xFFFF values
-        ; vphminposuw xmm0, xmm0   ; Find minimum and its index, result in lowest word
-        ; vmovd eax, xmm0          ; Move result to eax
-        ; and eax, 0xFFFF          ; Keep only lower 16 bits (the minimum value)
-        ; ret
-
-; solution 3
-        ; use movdqa and get rid of first shuf
-        ; shuf can be replaced with shift psrlq
-        vmovq xmm0, [rdi]       ; Load 4 x 16-bit values from x (using 64 bits)
-        
-        vpsrlq xmm1, xmm0, 32   ; Shift right by 32 bits to compare words 0,1 with 2,3
-        vpminuw xmm0, xmm0, xmm1 ; xmm0 now has min(0,2) and min(1,3) in lower 32 bits
-        
-        vpsrlq xmm1, xmm0, 16   ; Shift right by 16 bits to compare min(0,2) with min(1,3)
-        vpminuw xmm0, xmm0, xmm1 ; xmm0 now has overall minimum in lowest word
-        
-        vmovd eax, xmm0         ; Move result to eax (already zero-extends to 64-bit)
-        movzx eax, ax           ; Zero-extend 16-bit to 32-bit (faster than AND)
+        vmovd eax, xmm0             ; Move result to eax (already zero-extends to 64-bit)
+        movzx eax, ax               ; Zero-extend 16-bit to 32-bit
         ret
 
 ; void memcpy_bytes(void *dst, void *src, uint32_t num_bytes);
@@ -152,26 +104,37 @@ memcpy_bytes:
         or ecx, ecx
         jz copy_done
 
-        ; Process 32-byte chunks with AVX
+        ; Process 64-byte chunks with AVX-512
+        cmp ecx, 64
+        jb copy_32_bytes
+
+copy_64_loop:
+        vmovdqu8 zmm0, [rsi]    ; Load 64 bytes (512-bit AVX-512)
+        vmovdqu8 [rdi], zmm0    ; Store 64 bytes
+        add rsi, 64
+        add rdi, 64
+        sub ecx, 64
+        cmp ecx, 64
+        jae copy_64_loop
+
+copy_32_bytes:
+        ; Process 32-byte chunk with AVX-512
         cmp ecx, 32
         jb copy_16_bytes
 
-copy_32_loop:
-        vmovdqu ymm0, [rsi]     ; Load 32 bytes (256-bit AVX)
-        vmovdqu [rdi], ymm0     ; Store 32 bytes
+        vmovdqu8 ymm0, [rsi]    ; Load 32 bytes (256-bit AVX-512)
+        vmovdqu8 [rdi], ymm0    ; Store 32 bytes
         add rsi, 32
         add rdi, 32
         sub ecx, 32
-        cmp ecx, 32
-        jae copy_32_loop
 
 copy_16_bytes:
-        ; Process 16-byte chunk with AVX
+        ; Process 16-byte chunk with AVX-512
         cmp ecx, 16
         jb copy_remaining_bytes
 
-        vmovdqu xmm0, [rsi]     ; Load 16 bytes (128-bit AVX)
-        vmovdqu [rdi], xmm0     ; Store 16 bytes
+        vmovdqu8 xmm0, [rsi]    ; Load 16 bytes (128-bit AVX-512)
+        vmovdqu8 [rdi], xmm0    ; Store 16 bytes
         add rsi, 16
         add rdi, 16
         sub ecx, 16
