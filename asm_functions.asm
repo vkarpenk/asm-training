@@ -69,15 +69,13 @@ asm_sum8:
 ; Add array of 32-bit values and return result
 MKGLOBAL(asm_sum_array,function)
 asm_sum_array:
-        ;Loads a double quadword (128 bits / 16 bytes) of unaligned data from memory into XMM register.
-        ;A double quadword is 128 bits or 16 bytes, which can hold:
-        ;- 4 x 32-bit values (dwords)
-        ;- 2 x 64-bit values (qwords)
-        ;- 16 x 8-bit values (bytes)
-        movdqu xmm0, [rdi]      ; Load 4 x 32-bit values from x 
-        movdqu xmm1, [rsi]      ; Load 4 x 32-bit values from y
-        paddd xmm0, xmm1        ; Add packed doublewords
-        movdqu [rdx], xmm0      ; Store result to ret
+        ; Use AVX instructions for improved performance
+        ; vmovdqu loads 128 bits without destroying original source
+        ; AVX uses 3-operand form: dest = src1 op src2
+        vmovdqu xmm0, [rdi]     ; Load 4 x 32-bit values from x
+        vmovdqu xmm1, [rsi]     ; Load 4 x 32-bit values from y
+        vpaddd xmm0, xmm0, xmm1 ; Add packed doublewords: xmm0 = xmm0 + xmm1
+        vmovdqu [rdx], xmm0     ; Store result to ret
 
         ret
 
@@ -87,43 +85,62 @@ asm_sum_array:
 MKGLOBAL(asm_min_array,function)
 asm_min_array:
 ; solution 1
-        ; movq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
+        ; vmovq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
         
-        ; pshuflw xmm1, xmm0, 0x0E ; Move words '10' (2->pos0), '11' (3->pos1), 0->pos2, 0->pos3 = [3,2,1,0][0,0,3,2]
-        ; pminuw xmm0, xmm1        ; Compare 0,2 and 1,3 - lowest 2 words, result in xmm0 = [3,2,1,0][0,0,(3or1),(2or0)]
+        ; vpshuflw xmm1, xmm0, 0x0E ; Move words '10' (2->pos0), '11' (3->pos1), 0->pos2, 0->pos3 = [3,2,1,0][0,0,3,2]
+        ; vpminuw xmm0, xmm0, xmm1  ; Compare 0,2 and 1,3 - lowest 2 words, result in xmm0 = [3,2,1,0][0,0,(3or1),(2or0)]
         
-        ; pshuflw xmm1, xmm0, 0x01 ; Move '01' (1->pos0), 0 to all other positions = [3,2,1,0][(2or0),(2or0),(2or0),(3or1)]
-        ; pminuw xmm0, xmm1        ; Compare 0,(3or1) and 1,(2or0), result in lowest word = [3,2,1,0][(2or0),(2or0),1or(2or0),0or(3or1)]
+        ; vpshuflw xmm1, xmm0, 0x01 ; Move '01' (1->pos0), 0 to all other positions = [3,2,1,0][(2or0),(2or0),(2or0),(3or1)]
+        ; vpminuw xmm0, xmm0, xmm1  ; Compare 0,(3or1) and 1,(2or0), result in lowest word = [3,2,1,0][(2or0),(2or0),1or(2or0),0or(3or1)]
         
-        ; movd eax, xmm0          ; Move result to eax (32bits)
-        ; and eax, 0xFFFF         ; Keep only lower 16 bits
+        ; vmovd eax, xmm0          ; Move result to eax (32bits)
+        ; and eax, 0xFFFF          ; Keep only lower 16 bits
 
 ; solution 2
         ; only for 128 - phminposuw - find min and tells index - need to load same values across all xmm - or all 1s
 
-        ; movq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
-        ; pcmpeqw xmm1, xmm1      ; Set xmm1 to all 1s (0xFFFF in each word)
-        ; punpcklqdq xmm0, xmm1   ; Fill upper 64 bits with 0xFFFF values
-        ; phminposuw xmm0, xmm0   ; Find minimum and its index, result in lowest word
-        ; movd eax, xmm0          ; Move result to eax
-        ; and eax, 0xFFFF         ; Keep only lower 16 bits (the minimum value)
+        ; This code sequence finds the minimum unsigned 16-bit word value and its position
+        ; from the lower 64 bits (4 words) of an XMM register.
+
+        ; vpcmpeqw xmm1, xmm1, xmm1
+        ;   - AVX instruction that compares each word in xmm1 with itself
+        ;   - Since all comparisons are equal, sets all bits to 1
+        ;   - Result: xmm1 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        ;
+        ; vpunpcklqdq xmm0, xmm0, xmm1
+        ;   - AVX instruction that unpacks and interleaves the low quadwords (64 bits)
+        ;   - Takes lower 64 bits from first operand (xmm0) and lower 64 bits from second (xmm1)
+        ;   - Result: xmm0[63:0] = original xmm0[63:0], xmm0[127:64] = 0xFFFFFFFFFFFFFFFF
+        ;   - This effectively pads the upper half with maximum unsigned word values
+        ;
+        ; vphminposuw xmm0, xmm0
+        ;   - AVX instruction that finds the minimum unsigned 16-bit word and its position
+        ;   - Searches through all 8 words in the source XMM register
+        ;   - Returns minimum value in xmm0[15:0] and its index (0-7) in xmm0[18:16]
+        ;   - Since upper 4 words are 0xFFFF (maximum), minimum will be from lower 4 words
+        ;   - xmm0[31:19] and xmm0[127:32] are zeroed
+        
+        ; vmovq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
+        ; vpcmpeqw xmm1, xmm1, xmm1 ; Set xmm1 to all 1s (0xFFFF in each word)
+        ; vpunpcklqdq xmm0, xmm0, xmm1 ; Fill upper 64 bits with 0xFFFF values
+        ; vphminposuw xmm0, xmm0   ; Find minimum and its index, result in lowest word
+        ; vmovd eax, xmm0          ; Move result to eax
+        ; and eax, 0xFFFF          ; Keep only lower 16 bits (the minimum value)
         ; ret
 
 ; solution 3
         ; use movdqa and get rid of first shuf
         ; shuf can be replaced with shift psrlq
-        movq xmm0, [rdi]        ; Load 4 x 16-bit values from x (using 64 bits)
-        movdqa xmm1, xmm0       ; Copy to xmm1
+        vmovq xmm0, [rdi]       ; Load 4 x 16-bit values from x (using 64 bits)
         
-        psrlq xmm1, 32          ; Shift right by 32 bits to compare words 0,1 with 2,3
-        pminuw xmm0, xmm1       ; xmm0 now has min(0,2) and min(1,3) in lower 32 bits
+        vpsrlq xmm1, xmm0, 32   ; Shift right by 32 bits to compare words 0,1 with 2,3
+        vpminuw xmm0, xmm0, xmm1 ; xmm0 now has min(0,2) and min(1,3) in lower 32 bits
         
-        movdqa xmm1, xmm0       ; Copy result
-        psrlq xmm1, 16          ; Shift right by 16 bits to compare min(0,2) with min(1,3)
-        pminuw xmm0, xmm1       ; xmm0 now has overall minimum in lowest word
+        vpsrlq xmm1, xmm0, 16   ; Shift right by 16 bits to compare min(0,2) with min(1,3)
+        vpminuw xmm0, xmm0, xmm1 ; xmm0 now has overall minimum in lowest word
         
-        movd eax, xmm0          ; Move result to eax (32bits)
-        and eax, 0xFFFF         ; Keep only lower 16 bits
+        vmovd eax, xmm0         ; Move result to eax (already zero-extends to 64-bit)
+        movzx eax, ax           ; Zero-extend 16-bit to 32-bit (faster than AND)
         ret
 
 ; void memcpy_bytes(void *dst, void *src, uint32_t num_bytes);
@@ -135,18 +152,29 @@ memcpy_bytes:
         or ecx, ecx
         jz copy_done
 
-        ; Process 16-byte chunks with SSE
+        ; Process 32-byte chunks with AVX
+        cmp ecx, 32
+        jb copy_16_bytes
+
+copy_32_loop:
+        vmovdqu ymm0, [rsi]     ; Load 32 bytes (256-bit AVX)
+        vmovdqu [rdi], ymm0     ; Store 32 bytes
+        add rsi, 32
+        add rdi, 32
+        sub ecx, 32
+        cmp ecx, 32
+        jae copy_32_loop
+
+copy_16_bytes:
+        ; Process 16-byte chunk with AVX
         cmp ecx, 16
         jb copy_remaining_bytes
 
-copy_16_loop:
-        movdqu xmm0, [rsi]      ; Load 16 bytes
-        movdqu [rdi], xmm0      ; Store 16 bytes
+        vmovdqu xmm0, [rsi]     ; Load 16 bytes (128-bit AVX)
+        vmovdqu [rdi], xmm0     ; Store 16 bytes
         add rsi, 16
         add rdi, 16
         sub ecx, 16
-        cmp ecx, 16
-        jae copy_16_loop
 
 copy_remaining_bytes:
         ; Copy remaining bytes (< 16)
@@ -155,11 +183,9 @@ copy_remaining_bytes:
         cld                     ; Clear direction flag for rep (increment rsi/rdi)
  
         rep movsb
-        ; rep can go backwards inc of dec registers - uses flag direction 
-        ; std set dir flag, cdf clear (increment)
-        ; good to set status of flag before rep
 
-        copy_done:
+copy_done:
+        vzeroupper              ; Clear upper 128 bits of YMM registers (important for performance)
         ret
 
 ; void memcpy_bits(void *dst, void *src, uint32_t num_bits);
