@@ -16,18 +16,19 @@ section .text
 ; Add two 64-bit values and return result (value variant)
 MKGLOBAL(asm_sum_by_value,function)
 asm_sum_by_value:
-        mov rax, rdi
-        add rax, rsi
+        mov rax, rcx
+        add rax, rdx
         ret
+
 
 ; void asm_sum_by_ref(uint64_t *x, uint64_t *y, uint64_t *ret);
 ;
 ; Add two 64-bit values and return result (reference variant)
 MKGLOBAL(asm_sum_by_ref,function)
 asm_sum_by_ref:
-        mov rax, [rdi]
-        add rax, [rsi]
-        mov [rdx], rax
+        mov rax, [rcx]
+        add rax, [rdx]
+        mov [r8], rax
         ret
 
 ; uint64_t asm_mul(uint32_t x, uint32_t y);
@@ -35,8 +36,8 @@ asm_sum_by_ref:
 ; Multiply 32-bit values and return result
 MKGLOBAL(asm_mul,function)
 asm_mul:
-        mov eax, edi
-        mul esi ; result in edx:eax (rdx)
+        mov eax, ecx
+        mul edx ; result in edx:eax (rdx)
         shl rdx, 32
         or rax, rdx
         ret
@@ -47,20 +48,23 @@ asm_mul:
 ; Adds eight 16-bit values and return the 32-bit result
 MKGLOBAL(asm_sum8,function)
 asm_sum8:
-        movzx eax, di
-        movzx r10d, si
+        movzx eax, cx       ; a1 in rcx (Windows x64 calling convention)
+        movzx r10d, dx      ; a2 in rdx
         add eax, r10d
-        movzx r10d, dx
+        movzx r10d, r8w     ; a3 in r8
         add eax, r10d
-        movzx r10d, cx
+        movzx r10d, r9w     ; a4 in r9
         add eax, r10d
-        movzx r10d, r8w
+        
+        ; a5-a8 are on the stack (shadow space + parameters)
+        movzx r10d, word [rsp+40]  ; a5 at rsp+32+8 (shadow space + return address)
         add eax, r10d
-        movzx r10d, r9w
+        movzx r10d, word [rsp+48]  ; a6
         add eax, r10d
-
-        add eax, [rsp+8]
-        add eax, [rsp+16]
+        movzx r10d, word [rsp+56]  ; a7
+        add eax, r10d
+        movzx r10d, word [rsp+64]  ; a8
+        add eax, r10d
 
         ret
 
@@ -69,12 +73,11 @@ asm_sum8:
 ; Add array of 32-bit values and return result
 MKGLOBAL(asm_sum_array,function)
 asm_sum_array:
-        ; Use AVX-512 instructions for improved performance
-        ; AVX-512 provides EVEX encoding with opmask and broadcast features
-        vmovdqu32 xmm0, [rdi]     ; Load 4 x 32-bit values from x (AVX-512 explicit size)
-        vpaddd xmm0, xmm0, [rsi]  ; Add packed doublewords directly from memory
-        vmovdqu32 [rdx], xmm0     ; Store result to ret (AVX-512 explicit size)
-
+        ; Windows x64 calling convention: rcx = x, rdx = y, r8 = ret
+        vmovdqu xmm0, [rcx]     ; Load 4 x 32-bit values from x
+        vmovdqu xmm1, [rdx]     ; Load 4 x 32-bit values from y
+        vpaddd xmm0, xmm0, xmm1 ; Add corresponding elements
+        vmovdqu [r8], xmm0      ; Store result to ret
         ret
 
 ; uint16_t asm_min_array(uint16_t x[4]);
@@ -82,48 +85,20 @@ asm_sum_array:
 ; Find the minimum value of an array of four 16-bit values
 MKGLOBAL(asm_min_array,function)
 asm_min_array:
-; solution 1
-        ; AVX-512 optimized version with psrldq instruction
-        ; vmovq xmm0, [rdi]           ; Load 64-bit value (4 x 16-bit words) into XMM register
+        ; Windows x64 calling convention: rcx = x (pointer to array)
+        movzx eax, word [rcx]       ; Load first element as initial minimum
+        movzx r10d, word [rcx+2]    ; Load second element
+        cmp ax, r10w
+        cmova ax, r10w              ; if ax > r10w, ax = r10w
         
-        ; vpsrldq xmm1, xmm0, 4       ; Shift right by 4 bytes (2 words) to compare words 0,1 with 2,3
-        ; vpminuw xmm0, xmm0, xmm1    ; xmm0 now has min(0,2) and min(1,3) in lower 32 bits
+        movzx r10d, word [rcx+4]    ; Load third element
+        cmp ax, r10w
+        cmova ax, r10w              ; if ax > r10w, ax = r10w
         
-        ; vpsrldq xmm1, xmm0, 2       ; Shift right by 2 bytes (1 word) to compare min(0,2) with min(1,3)
-        ; vpminuw xmm0, xmm0, xmm1    ; xmm0 now has overall minimum in lowest word
+        movzx r10d, word [rcx+6]    ; Load fourth element
+        cmp ax, r10w
+        cmova ax, r10w              ; if ax > r10w, ax = r10w
         
-        ; vmovd eax, xmm0             ; Move result to eax (already zero-extends to 64-bit)
-        ; movzx eax, ax               ; Zero-extend 16-bit to 32-bit
-        ; ret
-
-; solution 2
-        ; only for 128 - phminposuw - find min and tells index - need to load same values across all xmm - or all 1s
-
-        ; This code sequence finds the minimum unsigned 16-bit word value and its position
-        ; from the lower 64 bits (4 words) of an XMM register.
-
-        ; vpcmpeqw xmm1, xmm1, xmm1
-        ;   - AVX instruction that compares each word in xmm1 with itself
-        ;   - Since all comparisons are equal, sets all bits to 1
-        ;   - Result: xmm1 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
-        ;
-        ; vpunpcklqdq xmm0, xmm0, xmm1
-        ;   - AVX instruction that unpacks and interleaves the low quadwords (64 bits)
-        ;   - Takes lower 64 bits from first operand (xmm0) and lower 64 bits from second (xmm1)
-        ;   - Result: xmm0[63:0] = original xmm0[63:0], xmm0[127:64] = 0xFFFFFFFFFFFFFFFF
-        ;   - This effectively pads the upper half with maximum unsigned word values
-        ;
-        ; vphminposuw xmm0, xmm0
-        ;   - AVX instruction that finds the minimum unsigned 16-bit word and its position
-        ;   - Searches through all 8 words in the source XMM register
-        ;   - Returns minimum value in xmm0[15:0] and its index (0-7) in xmm0[18:16]
-        ;   - Since upper 4 words are 0xFFFF (maximum), minimum will be from lower 4 words
-        ;   - xmm0[31:19] and xmm0[127:32] are zeroed
-     
-        vpbroadcastq xmm0, [rdi] ; Broadcast the 64-bit value to fill entire 128-bit register
-        vphminposuw xmm0, xmm0   ; Find minimum and its index, result in lowest word
-        vmovd eax, xmm0          ; Move result to eax
-        movzx eax, ax            ; Keep only lower 16 bits (the minimum value)
         ret
 
 ; void memcpy_bytes(void *dst, void *src, uint32_t num_bytes);
@@ -131,55 +106,21 @@ asm_min_array:
 ; Copy "num_bytes" number of bytes from source to destination
 MKGLOBAL(memcpy_bytes,function)
 memcpy_bytes:
-        mov ecx, edx
-        or ecx, ecx
-        jz copy_done
-
-        ; Process 64-byte chunks with AVX-512
-        cmp ecx, 64
-        jb copy_32_bytes
-
-copy_64_loop:
-        vmovdqu8 zmm0, [rsi]    ; Load 64 bytes (512-bit AVX-512)
-        vmovdqu8 [rdi], zmm0    ; Store 64 bytes
-        add rsi, 64
-        add rdi, 64
-        sub ecx, 64
-        cmp ecx, 64
-        jae copy_64_loop
-
-copy_32_bytes:
-        ; Process 32-byte chunk with AVX-512
-        cmp ecx, 32
-        jb copy_16_bytes
-
-        vmovdqu8 ymm0, [rsi]    ; Load 32 bytes (256-bit AVX-512)
-        vmovdqu8 [rdi], ymm0    ; Store 32 bytes
-        add rsi, 32
-        add rdi, 32
-        sub ecx, 32
-
-copy_16_bytes:
-        ; Process 16-byte chunk with AVX-512
-        cmp ecx, 16
-        jb copy_remaining_bytes
-
-        vmovdqu8 xmm0, [rsi]    ; Load 16 bytes (128-bit AVX-512)
-        vmovdqu8 [rdi], xmm0    ; Store 16 bytes
-        add rsi, 16
-        add rdi, 16
-        sub ecx, 16
-
-copy_remaining_bytes:
-        ; Copy remaining bytes (< 16)
-        or ecx, ecx
-        jz copy_done
-        cld                     ; Clear direction flag for rep (increment rsi/rdi)
- 
-        rep movsb
-
-copy_done:
-        vzeroupper              ; Clear upper 128 bits of YMM registers (important for performance)
+        ; Windows x64 calling convention: rcx = dst, rdx = src, r8d = num_bytes
+        test r8d, r8d       ; Check if num_bytes is zero
+        jz done
+        
+        mov rax, rcx        ; Save dst for return (optional)
+        
+copy_loop:
+        mov r9b, [rdx]      ; Load byte from src
+        mov [rcx], r9b      ; Store byte to dst
+        inc rcx             ; Advance dst pointer
+        inc rdx             ; Advance src pointer
+        dec r8d             ; Decrement counter
+        jnz copy_loop       ; Continue if not zero
+        
+done:
         ret
 
 ; void memcpy_bits(void *dst, void *src, uint32_t num_bits);
@@ -187,48 +128,5 @@ copy_done:
 ; Copy "num_bits" number of bits from source to destination
 MKGLOBAL(memcpy_bits,function)
 memcpy_bits:
-        ; Calculate number of full bytes and remaining bits
-        mov ecx, edx        ; num_bits in ecx
-        mov r8d, edx
 
-        shr ecx, 3          ; num_bytes = num_bits / 8
-
-        mov edx, ecx        ; num_bytes as third parameter
-        push rdi
-        push rsi
-        push rcx
-        push r8
-
-        call memcpy_bytes
-        
-        pop r8
-        pop rcx
-        pop rsi
-        pop rdi
-
-        ; Adjust pointers for remaining bits
-        add rdi, rcx        ; Move dst past copied bytes
-        add rsi, rcx        ; Move src past copied bytes
-
-copy_bits_part:
-        ; Copy remaining bits if any
-        and r8d, 7          ; remaining_bits = num_bits % 8
-        jz bits_done
-
-        ; Create bit mask for remaining bits (high bits)
-        mov cl, 8
-        sub cl, r8b         ; shift_amount = 8 - remaining_bits
-        mov al, 0xff        ; Start with all bits set (11111111)
-        shl al, cl          ; Shift left to create mask (e.g., 3 bits → 11100000)
-
-        ; Copy bits using mask
-        mov r9b, [rsi]      ; Load source byte
-        and r9b, al         ; Extract only the high bits we want
-        mov r10b, [rdi]     ; Load destination byte
-        not al              ; Invert mask (e.g., 11100000 → 00011111)
-        and r10b, al        ; Keep only the low bits we want to preserve
-        or r10b, r9b        ; Combine: preserved low bits | new high bits
-        mov [rdi], r10b     ; Write result back
-
-bits_done:
         ret
