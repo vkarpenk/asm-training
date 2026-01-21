@@ -81,45 +81,77 @@ asm_sum_array:
 
 ; uint16_t asm_min_array(uint16_t x[4]);
 ;
-; Find the minimum value of an array of four 16-bit values
+; Find the minimum value of an array of four 16-bit values using AVX2
 MKGLOBAL(asm_min_array,function)
 asm_min_array:
         ; Windows x64 calling convention: rcx = x (pointer to array)
-        movzx eax, word [rcx]       ; Load first element as initial minimum
-        movzx r10d, word [rcx+2]    ; Load second element
-        cmp ax, r10w
-        cmova ax, r10w              ; if ax > r10w, ax = r10w
-        
-        movzx r10d, word [rcx+4]    ; Load third element
-        cmp ax, r10w
-        cmova ax, r10w              ; if ax > r10w, ax = r10w
-        
-        movzx r10d, word [rcx+6]    ; Load fourth element
-        cmp ax, r10w
-        cmova ax, r10w              ; if ax > r10w, ax = r10w
-        
+        vmovq xmm0, [rcx]           ; Load 4 x 16-bit values (64 bits total)
+        vphminposuw xmm0, xmm0      ; Find minimum unsigned word and its position
+        movzx eax, xmm0             ; Extract minimum value (lower 16 bits)
         ret
+
 
 ; void memcpy_bytes(void *dst, void *src, uint32_t num_bytes);
 ;
-; Copy "num_bytes" number of bytes from source to destination
+; Copy "num_bytes" number of bytes from source to destination using AVX2
 MKGLOBAL(memcpy_bytes,function)
 memcpy_bytes:
         ; Windows x64 calling convention: rcx = dst, rdx = src, r8d = num_bytes
+        ; Save the values of RDI and RSI registers on the stack.
+        ; On Windows x64 calling convention, RDI and RSI are non-volatile (callee-saved) registers.
+        ; This means if a function modifies these registers, it must preserve their original values
+        ; and restore them before returning to the caller.
+        ; 
+        ; Note: While RDI and RSI are used for parameter passing in System V ABI (Linux/Unix),
+        ; on Windows x64 they are simply non-volatile registers that need to be preserved
+        ; if the function uses them for any purpose.
+        push rdi
+        push rsi
+        
         test r8d, r8d       ; Check if num_bytes is zero
         jz done
         
-        mov rax, rcx        ; Save dst for return (optional)
+        ; Copy 32 bytes at a time using AVX2 if num_bytes >= 32
+        cmp r8d, 32
+        jb copy_qword
         
-copy_loop:
-        mov r9b, [rdx]      ; Load byte from src
-        mov [rcx], r9b      ; Store byte to dst
-        inc rcx             ; Advance dst pointer
-        inc rdx             ; Advance src pointer
-        dec r8d             ; Decrement counter
-        jnz copy_loop       ; Continue if not zero
+copy_ymm_loop:
+        vmovdqu ymm0, [rdx]     ; Load 32 bytes from src (unaligned)
+        vmovdqu [rcx], ymm0     ; Store 32 bytes to dst (unaligned)
+        add rcx, 32             ; Advance dst pointer
+        add rdx, 32             ; Advance src pointer
+        sub r8d, 32             ; Decrement counter
+        cmp r8d, 32
+        jae copy_ymm_loop       ; Continue if >= 32 bytes remain
+        vzeroupper              ; Clear upper 128 bits of YMM registers
+        
+copy_qword:
+        ; Copy 8 bytes at a time if num_bytes >= 8
+        cmp r8d, 8
+        jb copy_remaining_bytes
+        
+copy_qword_loop:
+        mov r9, [rdx]           ; Load 8 bytes from src
+        mov [rcx], r9           ; Store 8 bytes to dst
+        add rcx, 8              ; Advance dst pointer
+        add rdx, 8              ; Advance src pointer
+        sub r8d, 8              ; Decrement counter
+        cmp r8d, 8
+        jae copy_qword_loop     ; Continue if >= 8 bytes remain
+        
+copy_remaining_bytes:
+        test r8d, r8d           ; Check if any bytes remain
+        jz done
+        
+        mov rdi, rcx            ; Destination (rdi is used by movsb)
+        mov rsi, rdx            ; Source (rsi is used by movsb)
+        mov ecx, r8d            ; Count (rcx is used by rep)
+        rep movsb               ; Copy rcx bytes from rsi to rdi
         
 done:
+        vzeroupper              ; Clear upper 128 bits of YMM registers
+        pop rsi
+        pop rdi
         ret
 
 ; void memcpy_bits(void *dst, void *src, uint32_t num_bits);
