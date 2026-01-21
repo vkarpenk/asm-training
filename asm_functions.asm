@@ -75,8 +75,7 @@ MKGLOBAL(asm_sum_array,function)
 asm_sum_array:
         ; Windows x64 calling convention: rcx = x, rdx = y, r8 = ret
         vmovdqu xmm0, [rcx]     ; Load 4 x 32-bit values from x
-        vmovdqu xmm1, [rdx]     ; Load 4 x 32-bit values from y
-        vpaddd xmm0, xmm0, xmm1 ; Add corresponding elements
+        vpaddd xmm0, xmm0, [rdx] ; Add corresponding elements
         vmovdqu [r8], xmm0      ; Store result to ret
         ret
 
@@ -128,5 +127,79 @@ done:
 ; Copy "num_bits" number of bits from source to destination
 MKGLOBAL(memcpy_bits,function)
 memcpy_bits:
+        ; Windows x64 calling convention: rcx = dst, rdx = src, r8d = num_bits
+        
+        ; Save non-volatile registers and allocate stack space
+        push rbx
+        push rdi
+        push rsi
+        ; Allocate shadow space (home space) for function calls on Windows x64 calling convention.
+        ; Windows x64 ABI requires the caller to reserve 32 bytes (4 * 8 bytes) of stack space
+        ; for the callee to optionally save the first 4 register parameters (RCX, RDX, R8, R9).
+        ; This is mandatory even if the called function has fewer than 4 parameters.
+        ; Note: This is a Windows-specific requirement and is not needed on Linux/System V AMD64 ABI.
+        sub rsp, 32         ; Allocate shadow space for function calls
 
+        ; Save original parameters
+        mov rdi, rcx        ; dst
+        mov rsi, rdx        ; src
+        mov ebx, r8d        ; num_bits
+        
+        ; Calculate number of full bytes: num_bits / 8
+        mov eax, ebx
+        shr eax, 3          ; Divide by 8
+        mov r10d, eax       ; Save num_bytes for later
+        test eax, eax
+        jz copy_remaining_bits
+        
+        ; Copy full bytes using memcpy_bytes
+        mov r8d, eax        ; num_bytes
+
+        ; Save registers that memcpy_bytes might modify
+        push rcx
+        push rdx
+        push r8
+        
+        call memcpy_bytes
+        
+        ; Restore registers
+        pop rdx
+        pop rcx
+        pop r8
+        
+        ; Adjust pointers for remaining bits
+        add rdi, r10        ; Advance dst by num_bytes
+        add rsi, r10        ; Advance src by num_bytes
+        shl r10d, 3         ; Convert num_bytes back to bits
+        sub ebx, r10d       ; Remaining bits
+        
+copy_remaining_bits:
+        test ebx, ebx
+        jz done_bits
+        
+        ; Copy remaining bits (less than 8)
+        mov al, [rsi]       ; Load source byte
+        mov cl, bl          ; Number of bits to copy
+        mov ah, 0xFF
+        shr ah, cl          ; Shift right to create mask for high bits to preserve
+        not ah              ; Invert to get mask for low bits to copy
+        and al, ah          ; Mask source bits (keep only num_bits from low bits)
+        
+        mov dl, [rdi]       ; Load destination byte
+        and dl, ah          ; Clear the low bits we're about to copy (ah still has low bit mask)
+        xor dl, al          ; Should use AND with inverted mask instead
+        
+        ; Correct approach: preserve high bits, replace low bits
+        mov dl, [rdi]       ; Reload destination byte
+        not ah              ; Invert to get mask for high bits to preserve
+        and dl, ah          ; Keep only high bits in destination
+        or dl, al           ; Combine with source bits
+        mov [rdi], dl       ; Store result
+        
+done_bits:
+        ; Restore registers and deallocate stack space
+        add rsp, 32         ; Deallocate shadow space
+        pop rsi
+        pop rdi
+        pop rbx
         ret
