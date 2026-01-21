@@ -82,17 +82,48 @@ asm_sum_array:
 ; Find the minimum value of an array of four 16-bit values
 MKGLOBAL(asm_min_array,function)
 asm_min_array:
-        ; AVX-512 optimized version with explicit size suffix
-        vmovq xmm0, [rdi]           ; Load 4 x 16-bit values from x (using 64 bits)
+; solution 1
+        ; AVX-512 optimized version with psrldq instruction
+        ; vmovq xmm0, [rdi]           ; Load 64-bit value (4 x 16-bit words) into XMM register
         
-        vpsrlq xmm1, xmm0, 32       ; Shift right by 32 bits to compare words 0,1 with 2,3
-        vpminuw xmm0, xmm0, xmm1    ; xmm0 now has min(0,2) and min(1,3) in lower 32 bits
+        ; vpsrldq xmm1, xmm0, 4       ; Shift right by 4 bytes (2 words) to compare words 0,1 with 2,3
+        ; vpminuw xmm0, xmm0, xmm1    ; xmm0 now has min(0,2) and min(1,3) in lower 32 bits
         
-        vpsrlq xmm1, xmm0, 16       ; Shift right by 16 bits to compare min(0,2) with min(1,3)
-        vpminuw xmm0, xmm0, xmm1    ; xmm0 now has overall minimum in lowest word
+        ; vpsrldq xmm1, xmm0, 2       ; Shift right by 2 bytes (1 word) to compare min(0,2) with min(1,3)
+        ; vpminuw xmm0, xmm0, xmm1    ; xmm0 now has overall minimum in lowest word
         
-        vmovd eax, xmm0             ; Move result to eax (already zero-extends to 64-bit)
-        movzx eax, ax               ; Zero-extend 16-bit to 32-bit
+        ; vmovd eax, xmm0             ; Move result to eax (already zero-extends to 64-bit)
+        ; movzx eax, ax               ; Zero-extend 16-bit to 32-bit
+        ; ret
+
+; solution 2
+        ; only for 128 - phminposuw - find min and tells index - need to load same values across all xmm - or all 1s
+
+        ; This code sequence finds the minimum unsigned 16-bit word value and its position
+        ; from the lower 64 bits (4 words) of an XMM register.
+
+        ; vpcmpeqw xmm1, xmm1, xmm1
+        ;   - AVX instruction that compares each word in xmm1 with itself
+        ;   - Since all comparisons are equal, sets all bits to 1
+        ;   - Result: xmm1 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        ;
+        ; vpunpcklqdq xmm0, xmm0, xmm1
+        ;   - AVX instruction that unpacks and interleaves the low quadwords (64 bits)
+        ;   - Takes lower 64 bits from first operand (xmm0) and lower 64 bits from second (xmm1)
+        ;   - Result: xmm0[63:0] = original xmm0[63:0], xmm0[127:64] = 0xFFFFFFFFFFFFFFFF
+        ;   - This effectively pads the upper half with maximum unsigned word values
+        ;
+        ; vphminposuw xmm0, xmm0
+        ;   - AVX instruction that finds the minimum unsigned 16-bit word and its position
+        ;   - Searches through all 8 words in the source XMM register
+        ;   - Returns minimum value in xmm0[15:0] and its index (0-7) in xmm0[18:16]
+        ;   - Since upper 4 words are 0xFFFF (maximum), minimum will be from lower 4 words
+        ;   - xmm0[31:19] and xmm0[127:32] are zeroed
+     
+        vpbroadcastq xmm0, [rdi] ; Broadcast the 64-bit value to fill entire 128-bit register
+        vphminposuw xmm0, xmm0   ; Find minimum and its index, result in lowest word
+        vmovd eax, xmm0          ; Move result to eax
+        movzx eax, ax            ; Keep only lower 16 bits (the minimum value)
         ret
 
 ; void memcpy_bytes(void *dst, void *src, uint32_t num_bytes);
@@ -161,10 +192,19 @@ memcpy_bits:
         mov r8d, edx
 
         shr ecx, 3          ; num_bytes = num_bits / 8
-        jz copy_bits_part   ; If no full bytes, go to bit copying
 
         mov edx, ecx        ; num_bytes as third parameter
+        push rdi
+        push rsi
+        push rcx
+        push r8
+
         call memcpy_bytes
+        
+        pop r8
+        pop rcx
+        pop rsi
+        pop rdi
 
         ; Adjust pointers for remaining bits
         add rdi, rcx        ; Move dst past copied bytes
